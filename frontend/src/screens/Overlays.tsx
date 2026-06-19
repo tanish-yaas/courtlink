@@ -1,6 +1,7 @@
 import { Button } from '../ui/Primitives';
 import { useStore } from '../state/store';
 import { rematch, leaveRoom } from '../net/socket';
+import { soloActive } from '../game/solo';
 import type { RoomState, ScoreState } from '../shared/types';
 
 export function CountdownOverlay({ n }: { n: number }) {
@@ -54,7 +55,7 @@ export function MatchOverOverlay({
 
   const onRematch = () => {
     rematch();
-    setScreen('waiting');
+    if (!soloActive()) setScreen('waiting');
   };
 
   return (

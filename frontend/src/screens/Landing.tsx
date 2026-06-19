@@ -33,6 +33,12 @@ export function Landing() {
           </Button>
         </div>
 
+        <div className="btn-row" style={{ marginTop: 12 }}>
+          <Button variant="ghost" block onClick={() => setScreen('solo')}>
+            Play vs Computer
+          </Button>
+        </div>
+
         <p className="helper">
           Singles, games to 11, win by 2. Built server-authoritative so both players see the
           same call.

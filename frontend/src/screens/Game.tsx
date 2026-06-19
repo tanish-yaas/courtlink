@@ -3,7 +3,7 @@ import { useStore, mySide as getMySide } from '../state/store';
 import { useGameLoop } from '../game/useGameLoop';
 import { HUD } from '../ui/HUD';
 import { ConnectionChip } from '../ui/Primitives';
-import { TouchControls, isTouchDevice } from '../ui/TouchControls';
+import { isTouchDevice } from '../ui/TouchControls';
 import { CountdownOverlay, PauseOverlay, MatchOverOverlay } from './Overlays';
 import type { Side } from '../shared/types';
 
@@ -27,14 +27,13 @@ export function Game() {
   const phase = snapshot?.phase ?? room.phase;
   const score = snapshot?.score ?? null;
   const amServer = score?.serving === side;
-  const canServe = phase === 'serving' && amServer;
 
   const hint = (() => {
     if (phase === 'serving') {
       if (!amServer) return 'Opponent to serve';
       return touch
-        ? 'Your serve — hold SERVE to charge (you can still move), release'
-        : 'Your serve — hold left-click to charge (you can still move), release';
+        ? 'Your serve — flick your paddle forward to serve'
+        : 'Your serve — flick your paddle forward to serve';
     }
     if (phase === 'rally') {
       return touch
@@ -55,10 +54,6 @@ export function Game() {
       </div>
 
       {hint && <div className="hint">{hint}</div>}
-
-      {touch && phase === 'serving' && amServer && (
-        <TouchControls canServe={canServe} />
-      )}
 
       {phase === 'countdown' && <CountdownOverlay n={snapshot?.countdown ?? 3} />}
       {phase === 'paused' && <PauseOverlay room={room} />}

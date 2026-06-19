@@ -1,26 +1,26 @@
 /**
- * useGameLoop — the client runtime (air-hockey rally model).
+ * useGameLoop — the client runtime (air-hockey model).
  *
  *   1. The paddle ALWAYS follows the cursor / finger 1:1 — it never locks.
- *   2. RALLY: when your moving paddle touches the ball, it is struck. The SPEED
- *      and DIRECTION of your swipe set the shot's power and aim (like air
- *      hockey). Contact is detected on the client (it owns the paddle), so it
- *      feels responsive; the server applies it to the authoritative ball.
- *   3. SERVE: hold to charge power while you keep moving/positioning, release to
- *      serve. The server aims it into the legal diagonal box and clears the net.
+ *   2. RALLY: when your puck visually touches the ball, it is struck. Contact is
+ *      checked in SCREEN space (cursor vs the drawn, height-lifted ball) so "what
+ *      you see is what you hit". The SPEED + DIRECTION of your swipe become the
+ *      shot's power and aim — like air hockey.
+ *   3. SERVE: a forward flick of your puck launches the serve in that direction
+ *      (no charging, you can always move). The server keeps it legal + over the net.
  *
- * Mouse and touch share one path. Desktop charges a serve with the left button
- * (or Space); mobile charges with the HOLD-TO-SERVE button. Both swipe to hit.
+ * Mouse and touch share one path. Contact and the swipe are detected on the
+ * client (it owns the paddle), so it feels responsive even at real-world ping.
  */
 import { useEffect, useRef, type RefObject } from 'react';
 import {
-  CHARGE_TIME_S,
+  CONTACT_REACH,
   HIT_COOLDOWN_S,
   HIT_MAX_HEIGHT,
   INPUT_RATE,
   NET_X,
-  PADDLE_REACH,
   PADDLE_SPEED,
+  SERVE_MIN_SWIPE,
   SWIPE_FULL_SPEED,
   WORLD_MAX_X,
   WORLD_MAX_Y,
@@ -30,7 +30,7 @@ import {
 import type { Side } from '../shared/types';
 import { CourtRenderer, type SwingViz } from './renderer';
 import { getRenderState } from './netState';
-import { inputState, setPointer, setTarget, setWantCharge, commitSwing, resetInput } from './input';
+import { inputState, setPointer, setTarget, commitSwing, resetInput } from './input';
 import { sendInput } from '../net/socket';
 import { useStore } from '../state/store';
 
@@ -75,16 +75,16 @@ export function useGameLoop(
 
     const prevTarget: Vec = { ...start };
     const vel: Vec = { x: 0, y: 0 }; // smoothed paddle velocity, world ft/s
-    let charging = false; // charging a SERVE
-    let chargeStart = 0;
     let lastHitTime = -9999;
     let hitFlashTime = -9999;
+    let lastServeTime = -9999;
+    let serveArmTime = -9999;
+    let prevPhase: string | null = null;
 
     const localPoint = (clientX: number, clientY: number): Vec => {
       const r = canvas.getBoundingClientRect();
       return { x: clientX - r.left, y: clientY - r.top };
     };
-
     const moveTo = (p: Vec) => {
       setPointer(p.x, p.y);
       const w = renderer.screenToWorld(p.x, p.y);
@@ -94,37 +94,23 @@ export function useGameLoop(
 
     // -- pointer (mouse + touch) -------------------------------------------
     const onPointerMove = (e: PointerEvent) => moveTo(localPoint(e.clientX, e.clientY));
-    const onPointerDown = (e: PointerEvent) => {
-      moveTo(localPoint(e.clientX, e.clientY));
-      if (e.pointerType === 'mouse' && e.button === 0) setWantCharge(true);
-    };
+    const onPointerDown = (e: PointerEvent) => moveTo(localPoint(e.clientX, e.clientY));
     const onPointerUp = (e: PointerEvent) => {
-      if (e.pointerType === 'mouse') setWantCharge(false);
-      else {
-        vel.x = 0; // finger lifted: no lingering swipe
+      if (e.pointerType !== 'mouse') {
+        vel.x = 0;
         vel.y = 0;
       }
     };
-
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointerup', onPointerUp);
 
-    // -- keyboard (optional): WASD nudge, Space charges a serve ------------
+    // -- keyboard (optional WASD nudge) ------------------------------------
     const onKeyDown = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      keys.current.add(k);
-      if (k === ' ') {
-        setWantCharge(true);
-        e.preventDefault();
-      }
-      if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
+      keys.current.add(e.key.toLowerCase());
+      if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(e.key.toLowerCase())) e.preventDefault();
     };
-    const onKeyUp = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      keys.current.delete(k);
-      if (k === ' ') setWantCharge(false);
-    };
+    const onKeyUp = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
     window.addEventListener('keydown', onKeyDown, { passive: false });
     window.addEventListener('keyup', onKeyUp);
 
@@ -140,18 +126,9 @@ export function useGameLoop(
       const dt = clamp((now - last) / 1000, 0.0001, 0.05);
       last = now;
 
-      const target = clampHalf(mySide ?? 'A', { x: inputState.targetX, y: inputState.targetY });
+      let target = clampHalf(mySide ?? 'A', { x: inputState.targetX, y: inputState.targetY });
 
-      // Smoothed paddle (cursor) velocity — this is the "swipe".
-      const instVx = (target.x - prevTarget.x) / dt;
-      const instVy = (target.y - prevTarget.y) / dt;
-      vel.x = vel.x * 0.55 + instVx * 0.45;
-      vel.y = vel.y * 0.55 + instVy * 0.45;
-      prevTarget.x = target.x;
-      prevTarget.y = target.y;
-      predicted.current = target;
-
-      // --- keyboard nudge (screen-relative to match the rotated view) ------
+      // keyboard nudge (screen-relative)
       if (mySide) {
         let kdx = 0;
         let kdy = 0;
@@ -161,64 +138,69 @@ export function useGameLoop(
         if (keys.current.has('s') || keys.current.has('arrowdown')) kdy += 1;
         if (kdx || kdy) {
           const dir = renderer.screenDirToWorld(kdx, kdy);
-          const c = clampHalf(mySide, {
-            x: target.x + dir.x * PADDLE_SPEED * dt,
-            y: target.y + dir.y * PADDLE_SPEED * dt,
-          });
-          setTarget(c.x, c.y);
-          predicted.current = c;
+          target = clampHalf(mySide, { x: target.x + dir.x * PADDLE_SPEED * dt, y: target.y + dir.y * PADDLE_SPEED * dt });
+          setTarget(target.x, target.y);
         }
       }
+
+      // smoothed swipe velocity (world ft/s)
+      vel.x = vel.x * 0.5 + ((target.x - prevTarget.x) / dt) * 0.5;
+      vel.y = vel.y * 0.5 + ((target.y - prevTarget.y) / dt) * 0.5;
+      prevTarget.x = target.x;
+      prevTarget.y = target.y;
+      predicted.current = target;
 
       const state = getRenderState();
       const phase = state?.phase ?? null;
       const serving = state?.score?.serving ?? null;
       const amServer = !!serving && serving === mySide;
-
-      // --- SERVE: charge while still free to move; release to serve --------
-      if (phase === 'serving' && amServer) {
-        if (inputState.wantCharge && !charging) {
-          charging = true;
-          inputState.charging = true;
-          chargeStart = now;
-        } else if (!inputState.wantCharge && charging) {
-          charging = false;
-          inputState.charging = false;
-          const power = clamp((now - chargeStart) / (CHARGE_TIME_S * 1000), 0.12, 1);
-          commitSwing(mySide === 'B' ? -1 : 1, 0, power);
-        }
-      } else if (charging) {
-        charging = false;
-        inputState.charging = false;
+      if (phase !== prevPhase) {
+        if (phase === 'serving') serveArmTime = now + 350; // brief arm delay
+        prevPhase = phase;
       }
-      const servePower = charging ? clamp((now - chargeStart) / (CHARGE_TIME_S * 1000), 0.12, 1) : 0;
 
-      // --- RALLY: contact + swipe = hit (air hockey) ----------------------
+      const speed = Math.hypot(vel.x, vel.y);
+      const forward = mySide === 'A' ? vel.x : -vel.x; // +ve = toward opponent
+      let flash = 0;
+
+      // --- SERVE: a forward flick launches it ------------------------------
+      if (phase === 'serving' && amServer && now > serveArmTime && now - lastServeTime > 600) {
+        if (speed > SERVE_MIN_SWIPE && forward > 0) {
+          const dir = { x: vel.x / speed, y: vel.y / speed };
+          const power = clamp(speed / SWIPE_FULL_SPEED, 0.28, 1);
+          commitSwing(dir.x, dir.y, power);
+          lastServeTime = now;
+          hitFlashTime = now;
+        }
+      }
+
+      // --- RALLY: screen-space contact = hit -------------------------------
       if (phase === 'rally' && state && mySide && now - lastHitTime > HIT_COOLDOWN_S * 1000) {
         const ball = state.ball;
-        const onMySide = mySide === 'A' ? ball.x <= NET_X + PADDLE_REACH : ball.x >= NET_X - PADDLE_REACH;
-        const d = Math.hypot(ball.x - (predicted.current?.x ?? target.x), ball.y - (predicted.current?.y ?? target.y));
-        if (onMySide && d <= PADDLE_REACH && ball.z <= HIT_MAX_HEIGHT) {
-          const speed = Math.hypot(vel.x, vel.y);
-          const dir = speed > 6 ? { x: vel.x / speed, y: vel.y / speed } : { x: mySide === 'B' ? -1 : 1, y: 0 };
-          const power = clamp(speed / SWIPE_FULL_SPEED, 0, 1);
+        const onMySide = mySide === 'A' ? ball.x <= NET_X + CONTACT_REACH : ball.x >= NET_X - CONTACT_REACH;
+        const ps = renderer.worldToScreenCss(predicted.current.x, predicted.current.y);
+        const bs = renderer.ballScreenCss(ball);
+        const dpx = Math.hypot(ps.x - bs.x, ps.y - bs.y);
+        const reachPx = CONTACT_REACH * renderer.pxPerFootCss;
+        if (onMySide && dpx <= reachPx && ball.z <= HIT_MAX_HEIGHT) {
+          const dir = speed > 5 ? { x: vel.x / speed, y: vel.y / speed } : { x: mySide === 'B' ? -1 : 1, y: 0 };
+          const power = clamp(speed / SWIPE_FULL_SPEED, 0.18, 1);
           commitSwing(dir.x, dir.y, power);
           lastHitTime = now;
           hitFlashTime = now;
         }
       }
-      const flash = now - hitFlashTime < 220 ? 1 - (now - hitFlashTime) / 220 : 0;
+      if (now - hitFlashTime < 220) flash = 1 - (now - hitFlashTime) / 220;
 
-      // --- send input at a fixed rate -------------------------------------
+      // --- send input ------------------------------------------------------
       inputAccum += dt * 1000;
       if (inputAccum >= inputInterval) {
         inputAccum = 0;
-        const p = predicted.current ?? target;
         sendInput({
           seq: ++seq.current,
-          targetX: p.x,
-          targetY: p.y,
-          charging: inputState.charging,
+          targetX: target.x,
+          targetY: target.y,
+          charging: false,
           swingId: inputState.swingId,
           aimX: inputState.aimX,
           aimY: inputState.aimY,
@@ -228,12 +210,9 @@ export function useGameLoop(
 
       // --- draw ------------------------------------------------------------
       if (state) {
-        let viz: SwingViz | null = null;
-        if (charging) {
-          viz = { charging: true, power: servePower, aimX: mySide === 'B' ? -1 : 1, aimY: 0, flash: 0 };
-        } else if (flash > 0) {
-          viz = { charging: false, power: 0, aimX: inputState.aimX, aimY: inputState.aimY, flash };
-        }
+        const viz: SwingViz | null = flash > 0
+          ? { charging: false, power: 0, aimX: inputState.aimX, aimY: inputState.aimY, flash }
+          : null;
         renderer.draw(state, mySide, predicted.current, viz);
       }
 

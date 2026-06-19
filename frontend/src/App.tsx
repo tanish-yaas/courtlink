@@ -3,6 +3,7 @@ import { useStore } from './state/store';
 import { tryAutoReconnect } from './net/socket';
 import { parseRoomFromHash } from './ui/roomLink';
 import { Landing } from './screens/Landing';
+import { SoloSetup } from './screens/SoloSetup';
 import { CreateMatch } from './screens/CreateMatch';
 import { JoinMatch } from './screens/JoinMatch';
 import { SideSelect } from './screens/SideSelect';
@@ -25,6 +26,8 @@ export default function App() {
   }, []);
 
   switch (screen) {
+    case 'solo':
+      return <SoloSetup />;
     case 'create':
       return <CreateMatch />;
     case 'join':

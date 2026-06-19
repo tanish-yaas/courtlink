@@ -3,6 +3,7 @@ import type { GameEvent, GameSnapshot, RoomState, Side } from '../shared/types';
 
 export type Screen =
   | 'landing'
+  | 'solo'
   | 'create'
   | 'join'
   | 'side'

@@ -134,6 +134,23 @@ export class CourtRenderer {
     return v * this.scale;
   }
 
+  /** CSS px per court-foot (for screen-space contact math in the loop). */
+  get pxPerFootCss() {
+    return this.scale / this.dpr;
+  }
+
+  /** Paddle/ground world point -> canvas CSS px. */
+  worldToScreenCss(x: number, y: number): { x: number; y: number } {
+    const p = this.worldToScreen(x, y);
+    return { x: p.x / this.dpr, y: p.y / this.dpr };
+  }
+
+  /** The ball's DRAWN position (its height lifts it up-screen) in CSS px. */
+  ballScreenCss(ball: { x: number; y: number; z: number }): { x: number; y: number } {
+    const p = this.worldToScreen(ball.x, ball.y);
+    return { x: p.x / this.dpr, y: (p.y - ball.z * this.scale) / this.dpr };
+  }
+
   // -- main draw -----------------------------------------------------------
   draw(
     state: RenderState,

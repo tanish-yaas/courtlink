@@ -62,7 +62,7 @@ interface PaddleRuntime {
   hitCooldown: number;
 }
 
-interface RallyTracking {
+export interface RallyTracking {
   lastHitBy: Side | null;
   bounceSinceLastHit: boolean;
   serveInProgress: boolean;
@@ -79,7 +79,7 @@ export class GameSim {
   score: ScoreState = { A: 0, B: 0, serving: 'A', serverNumber: 1, serviceCourt: 'right' };
   paddles: Record<Side, PaddleRuntime> = { A: makePaddle('A'), B: makePaddle('B') };
 
-  private rally: RallyTracking = freshRally();
+  rally: RallyTracking = freshRally();
   private timer = 0;
   private events: GameEvent[] = [];
 

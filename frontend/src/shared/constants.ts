@@ -51,7 +51,9 @@ export const SHOT_MAX_DIST = 40; // landing distance at full power
 // Air-hockey rally hits: contact + swipe velocity decides power & direction.
 export const SWIPE_FULL_SPEED = 70; // cursor speed (ft/s) that maps to full power
 export const HIT_COOLDOWN_S = 0.28; // min time between a player's contact hits
-export const SERVER_HIT_REACH = 7.0; // generous server-side contact validation (lag tolerance)
+export const SERVER_HIT_REACH = 10.0; // generous server-side contact validation (lag tolerance)
+export const CONTACT_REACH = 2.6; // ft: how close the puck must be (screen-space) to strike
+export const SERVE_MIN_SWIPE = 16; // ft/s: a forward flick this fast launches a serve
 
 // --- Networking / loop timing ---------------------------------------------
 export const TICK_RATE = 60;
@@ -80,7 +82,7 @@ export const DEFAULT_RULES: RuleConfig = {
   winBy: 2,
   twoBounceRule: true,
   enforceKitchen: true,
-  enforceDiagonalServe: true,
+  enforceDiagonalServe: false, // serve just has to clear the net and land in-bounds, so it's freely aimable
 };
 
 export const ROOM_CODE_LENGTH = 6;

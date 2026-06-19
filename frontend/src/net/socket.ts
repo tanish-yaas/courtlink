@@ -19,6 +19,7 @@ import {
 } from '../shared/types';
 import { useStore } from '../state/store';
 import { pushSnapshot } from '../game/netState';
+import { soloActive, soloInput, stopSolo, restartSolo } from '../game/solo';
 
 const BACKEND_URL =
   (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
@@ -179,12 +180,25 @@ export function configure(rules: Partial<RuleConfig>) {
   ensureSocket().emit(NetEvents.Configure, { rules });
 }
 export function rematch() {
+  if (soloActive()) {
+    restartSolo();
+    return;
+  }
   ensureSocket().emit(NetEvents.Rematch);
 }
 export function sendInput(input: InputReq) {
+  if (soloActive()) {
+    soloInput(input);
+    return;
+  }
   socket?.emit(NetEvents.Input, input);
 }
 export function leaveRoom() {
+  if (soloActive()) {
+    stopSolo();
+    useStore.getState().reset();
+    return;
+  }
   socket?.emit(NetEvents.Leave);
   clearIdentity();
   useStore.getState().reset();
