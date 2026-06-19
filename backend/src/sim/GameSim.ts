@@ -17,7 +17,7 @@ import {
   COURT_WIDTH,
   HIT_MAX_HEIGHT,
   NET_X,
-  PADDLE_REACH,
+  SERVER_HIT_REACH,
   SHOT_MAX_DIST,
   SHOT_MIN_DIST,
   WORLD_MAX_X,
@@ -247,11 +247,14 @@ export class GameSim {
     const p = this.paddles[side];
     if (p.hitCooldown > 0) return;
 
-    const dx = Math.abs(this.ball.x - p.x);
-    const dy = Math.abs(this.ball.y - p.y);
-    if (dx > PADDLE_REACH || dy > PADDLE_REACH || this.ball.z > HIT_MAX_HEIGHT) return; // whiff
+    // The client detects the actual paddle-on-ball contact (it owns the paddle
+    // position 1:1), so the server only needs a generous sanity gate to reject
+    // hits when the ball clearly isn't near the paddle. The wide reach absorbs
+    // the ~100-200ms the client's view lags behind the authoritative ball.
+    const dist = Math.hypot(this.ball.x - p.x, this.ball.y - p.y);
+    if (dist > SERVER_HIT_REACH || this.ball.z > HIT_MAX_HEIGHT) return; // whiff
 
-    const onMySide = side === 'A' ? this.ball.x <= NET_X + PADDLE_REACH : this.ball.x >= NET_X - PADDLE_REACH;
+    const onMySide = side === 'A' ? this.ball.x <= NET_X + SERVER_HIT_REACH : this.ball.x >= NET_X - SERVER_HIT_REACH;
     if (!onMySide) return;
 
     const isVolley = this.ball.z > BALL_RADIUS + 0.05 && !this.rally.bounceSinceLastHit;

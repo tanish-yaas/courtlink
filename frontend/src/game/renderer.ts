@@ -40,10 +40,11 @@ const C = {
 const LAYOUT_MARGIN = 3.5; // ft of breathing room drawn around the court
 
 export interface SwingViz {
-  charging: boolean;
+  charging: boolean; // charging a serve
   power: number; // 0..1
   aimX: number; // world dir
   aimY: number;
+  flash: number; // 0..1 contact pulse (rally hit feedback)
 }
 
 interface TrailPoint {
@@ -154,9 +155,9 @@ export class CourtRenderer {
     this.drawPaddle('A', a, state, mySide);
     this.drawPaddle('B', b, state, mySide);
 
-    // Aim + charge viz for the local player.
+    // Serve charge ring / aim, or a rally contact pulse, for the local player.
     const own = mySide === 'A' ? a : mySide === 'B' ? b : null;
-    if (own && viz && viz.charging) this.drawAim(own, viz);
+    if (own && viz) this.drawSwingViz(own, viz);
 
     this.drawBall(state.ball);
   }
@@ -371,47 +372,58 @@ export class CourtRenderer {
     ctx.restore();
   }
 
-  private drawAim(own: { x: number; y: number }, viz: SwingViz) {
+  private drawSwingViz(own: { x: number; y: number }, viz: SwingViz) {
     const { ctx } = this;
-    const from = this.worldToScreen(own.x, own.y);
-    const reach = 3 + viz.power * 9;
-    const to = this.worldToScreen(own.x + viz.aimX * reach, own.y + viz.aimY * reach);
+    const c = this.worldToScreen(own.x, own.y);
 
-    // Aim line.
-    ctx.save();
-    ctx.strokeStyle = `rgba(228,201,126,${0.35 + viz.power * 0.5})`;
-    ctx.lineWidth = Math.max(2, this.sv(0.16));
-    ctx.setLineDash([this.sv(0.5), this.sv(0.35)]);
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    // Arrow head.
-    const ang = Math.atan2(to.y - from.y, to.x - from.x);
-    const ah = this.sv(0.7);
-    ctx.fillStyle = C.goldSoft;
-    ctx.beginPath();
-    ctx.moveTo(to.x, to.y);
-    ctx.lineTo(to.x - ah * Math.cos(ang - 0.4), to.y - ah * Math.sin(ang - 0.4));
-    ctx.lineTo(to.x - ah * Math.cos(ang + 0.4), to.y - ah * Math.sin(ang + 0.4));
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
+    // Serve charge: forward aim arrow + power ring.
+    if (viz.charging) {
+      const reach = 3 + viz.power * 8;
+      const to = this.worldToScreen(own.x + viz.aimX * reach, own.y + viz.aimY * reach);
+      ctx.save();
+      ctx.strokeStyle = `rgba(228,201,126,${0.35 + viz.power * 0.5})`;
+      ctx.lineWidth = Math.max(2, this.sv(0.16));
+      ctx.setLineDash([this.sv(0.5), this.sv(0.35)]);
+      ctx.beginPath();
+      ctx.moveTo(c.x, c.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const ang = Math.atan2(to.y - c.y, to.x - c.x);
+      const ah = this.sv(0.7);
+      ctx.fillStyle = C.goldSoft;
+      ctx.beginPath();
+      ctx.moveTo(to.x, to.y);
+      ctx.lineTo(to.x - ah * Math.cos(ang - 0.4), to.y - ah * Math.sin(ang - 0.4));
+      ctx.lineTo(to.x - ah * Math.cos(ang + 0.4), to.y - ah * Math.sin(ang + 0.4));
+      ctx.closePath();
+      ctx.fill();
 
-    // Power ring around the paddle.
-    ctx.save();
-    const rr = this.sv(1.7);
-    ctx.lineWidth = Math.max(2, this.sv(0.18));
-    ctx.strokeStyle = 'rgba(243,234,216,0.18)';
-    ctx.beginPath();
-    ctx.arc(from.x, from.y, rr, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.strokeStyle = C.ball;
-    ctx.beginPath();
-    ctx.arc(from.x, from.y, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * viz.power);
-    ctx.stroke();
-    ctx.restore();
+      const rr = this.sv(1.7);
+      ctx.lineWidth = Math.max(2, this.sv(0.18));
+      ctx.strokeStyle = 'rgba(243,234,216,0.18)';
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, rr, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = C.ball;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * viz.power);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Rally contact: a quick expanding pulse where the ball was struck.
+    if (viz.flash > 0) {
+      ctx.save();
+      const rr = this.sv(1.3 + (1 - viz.flash) * 2.4);
+      ctx.globalAlpha = viz.flash * 0.8;
+      ctx.strokeStyle = C.goldSoft;
+      ctx.lineWidth = Math.max(2, this.sv(0.2));
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, rr, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   private drawBall(ball: { x: number; y: number; z: number }) {

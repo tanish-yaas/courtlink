@@ -1,22 +1,27 @@
 /**
- * useGameLoop — the client runtime.
+ * useGameLoop — the client runtime (air-hockey rally model).
  *
- *   1. RAF render loop while the game screen is mounted.
- *   2. Pointer (mouse/finger) over the court drives the paddle TARGET 1:1.
- *   3. Hold to charge a swing (power ramps); while held the paddle locks and the
- *      pointer drag becomes the slingshot AIM. Release fires (new swingId).
- *   4. Input is sent at INPUT_RATE; the own paddle is predicted locally and the
- *      server reconciles via the authoritative feed.
+ *   1. The paddle ALWAYS follows the cursor / finger 1:1 — it never locks.
+ *   2. RALLY: when your moving paddle touches the ball, it is struck. The SPEED
+ *      and DIRECTION of your swipe set the shot's power and aim (like air
+ *      hockey). Contact is detected on the client (it owns the paddle), so it
+ *      feels responsive; the server applies it to the authoritative ball.
+ *   3. SERVE: hold to charge power while you keep moving/positioning, release to
+ *      serve. The server aims it into the legal diagonal box and clears the net.
  *
- * Mouse and touch share one path: both feed `inputState`. Desktop charges from
- * the left button / Space; mobile charges from the HOLD-TO-HIT button.
+ * Mouse and touch share one path. Desktop charges a serve with the left button
+ * (or Space); mobile charges with the HOLD-TO-SERVE button. Both swipe to hit.
  */
 import { useEffect, useRef, type RefObject } from 'react';
 import {
   CHARGE_TIME_S,
+  HIT_COOLDOWN_S,
+  HIT_MAX_HEIGHT,
   INPUT_RATE,
   NET_X,
+  PADDLE_REACH,
   PADDLE_SPEED,
+  SWIPE_FULL_SPEED,
   WORLD_MAX_X,
   WORLD_MAX_Y,
   WORLD_MIN_X,
@@ -64,51 +69,48 @@ export function useGameLoop(
     renderer.setMySide(mySide);
     resetInput(mySide);
 
-    // Seed pointer + target at the player's start so nothing jumps.
     const start = clampHalf(mySide ?? 'A', { x: mySide === 'B' ? 37 : 7, y: 10 });
     setTarget(start.x, start.y);
     predicted.current = { ...start };
 
-    let charging = false;
+    const prevTarget: Vec = { ...start };
+    const vel: Vec = { x: 0, y: 0 }; // smoothed paddle velocity, world ft/s
+    let charging = false; // charging a SERVE
     let chargeStart = 0;
-    const chargeStartScreen: Vec = { x: 0, y: 0 };
+    let lastHitTime = -9999;
+    let hitFlashTime = -9999;
 
     const localPoint = (clientX: number, clientY: number): Vec => {
       const r = canvas.getBoundingClientRect();
       return { x: clientX - r.left, y: clientY - r.top };
     };
 
-    // -- pointer (mouse + touch via Pointer Events) ------------------------
-    const onPointerMove = (e: PointerEvent) => {
-      const p = localPoint(e.clientX, e.clientY);
+    const moveTo = (p: Vec) => {
       setPointer(p.x, p.y);
-      if (!inputState.wantCharge) {
-        const w = renderer.screenToWorld(p.x, p.y);
-        const c = clampHalf(mySide ?? 'A', w);
-        setTarget(c.x, c.y);
-      }
+      const w = renderer.screenToWorld(p.x, p.y);
+      const c = clampHalf(mySide ?? 'A', w);
+      setTarget(c.x, c.y);
     };
+
+    // -- pointer (mouse + touch) -------------------------------------------
+    const onPointerMove = (e: PointerEvent) => moveTo(localPoint(e.clientX, e.clientY));
     const onPointerDown = (e: PointerEvent) => {
-      const p = localPoint(e.clientX, e.clientY);
-      setPointer(p.x, p.y);
-      if (e.pointerType === 'mouse') {
-        if (e.button === 0) setWantCharge(true);
-      } else {
-        // touch: move the paddle to the finger (charge comes from the HIT button)
-        const w = renderer.screenToWorld(p.x, p.y);
-        const c = clampHalf(mySide ?? 'A', w);
-        if (!inputState.wantCharge) setTarget(c.x, c.y);
-      }
+      moveTo(localPoint(e.clientX, e.clientY));
+      if (e.pointerType === 'mouse' && e.button === 0) setWantCharge(true);
     };
     const onPointerUp = (e: PointerEvent) => {
       if (e.pointerType === 'mouse') setWantCharge(false);
+      else {
+        vel.x = 0; // finger lifted: no lingering swipe
+        vel.y = 0;
+      }
     };
 
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointerup', onPointerUp);
 
-    // -- keyboard (optional): WASD nudges, Space charges -------------------
+    // -- keyboard (optional): WASD nudge, Space charges a serve ------------
     const onKeyDown = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
       keys.current.add(k);
@@ -134,62 +136,88 @@ export function useGameLoop(
     let inputAccum = 0;
     const inputInterval = 1000 / INPUT_RATE;
 
-    const aimNow = (): Vec => {
-      const dx = inputState.pointerX - chargeStartScreen.x;
-      const dy = inputState.pointerY - chargeStartScreen.y;
-      if (Math.hypot(dx, dy) < 8) return { x: mySide === 'B' ? -1 : 1, y: 0 };
-      return renderer.screenDirToWorld(dx, dy);
-    };
-
     const frame = (now: number) => {
-      const dt = Math.min(0.05, (now - last) / 1000);
+      const dt = clamp((now - last) / 1000, 0.0001, 0.05);
       last = now;
 
-      // --- reconcile charge state (works for mouse, touch button, Space) ---
-      if (inputState.wantCharge && !charging) {
-        charging = true;
-        inputState.charging = true;
-        chargeStart = now;
-        chargeStartScreen.x = inputState.pointerX;
-        chargeStartScreen.y = inputState.pointerY;
-      } else if (!inputState.wantCharge && charging) {
-        charging = false;
-        inputState.charging = false;
-        const aim = aimNow();
-        const power = clamp((now - chargeStart) / (CHARGE_TIME_S * 1000), 0.12, 1);
-        commitSwing(aim.x, aim.y, power);
-      }
-      const power = charging ? clamp((now - chargeStart) / (CHARGE_TIME_S * 1000), 0.12, 1) : 0;
+      const target = clampHalf(mySide ?? 'A', { x: inputState.targetX, y: inputState.targetY });
 
-      // --- keyboard nudge (screen-relative so it matches the rotated view) ---
-      if (!charging && mySide) {
+      // Smoothed paddle (cursor) velocity — this is the "swipe".
+      const instVx = (target.x - prevTarget.x) / dt;
+      const instVy = (target.y - prevTarget.y) / dt;
+      vel.x = vel.x * 0.55 + instVx * 0.45;
+      vel.y = vel.y * 0.55 + instVy * 0.45;
+      prevTarget.x = target.x;
+      prevTarget.y = target.y;
+      predicted.current = target;
+
+      // --- keyboard nudge (screen-relative to match the rotated view) ------
+      if (mySide) {
         let kdx = 0;
         let kdy = 0;
         if (keys.current.has('a') || keys.current.has('arrowleft')) kdx -= 1;
         if (keys.current.has('d') || keys.current.has('arrowright')) kdx += 1;
-        if (keys.current.has('w') || keys.current.has('arrowup')) kdy -= 1; // up the screen
+        if (keys.current.has('w') || keys.current.has('arrowup')) kdy -= 1;
         if (keys.current.has('s') || keys.current.has('arrowdown')) kdy += 1;
         if (kdx || kdy) {
           const dir = renderer.screenDirToWorld(kdx, kdy);
           const c = clampHalf(mySide, {
-            x: inputState.targetX + dir.x * PADDLE_SPEED * dt,
-            y: inputState.targetY + dir.y * PADDLE_SPEED * dt,
+            x: target.x + dir.x * PADDLE_SPEED * dt,
+            y: target.y + dir.y * PADDLE_SPEED * dt,
           });
           setTarget(c.x, c.y);
+          predicted.current = c;
         }
       }
 
-      // --- predicted own paddle = clamped target (1:1) ---------------------
-      predicted.current = clampHalf(mySide ?? 'A', { x: inputState.targetX, y: inputState.targetY });
+      const state = getRenderState();
+      const phase = state?.phase ?? null;
+      const serving = state?.score?.serving ?? null;
+      const amServer = !!serving && serving === mySide;
+
+      // --- SERVE: charge while still free to move; release to serve --------
+      if (phase === 'serving' && amServer) {
+        if (inputState.wantCharge && !charging) {
+          charging = true;
+          inputState.charging = true;
+          chargeStart = now;
+        } else if (!inputState.wantCharge && charging) {
+          charging = false;
+          inputState.charging = false;
+          const power = clamp((now - chargeStart) / (CHARGE_TIME_S * 1000), 0.12, 1);
+          commitSwing(mySide === 'B' ? -1 : 1, 0, power);
+        }
+      } else if (charging) {
+        charging = false;
+        inputState.charging = false;
+      }
+      const servePower = charging ? clamp((now - chargeStart) / (CHARGE_TIME_S * 1000), 0.12, 1) : 0;
+
+      // --- RALLY: contact + swipe = hit (air hockey) ----------------------
+      if (phase === 'rally' && state && mySide && now - lastHitTime > HIT_COOLDOWN_S * 1000) {
+        const ball = state.ball;
+        const onMySide = mySide === 'A' ? ball.x <= NET_X + PADDLE_REACH : ball.x >= NET_X - PADDLE_REACH;
+        const d = Math.hypot(ball.x - (predicted.current?.x ?? target.x), ball.y - (predicted.current?.y ?? target.y));
+        if (onMySide && d <= PADDLE_REACH && ball.z <= HIT_MAX_HEIGHT) {
+          const speed = Math.hypot(vel.x, vel.y);
+          const dir = speed > 6 ? { x: vel.x / speed, y: vel.y / speed } : { x: mySide === 'B' ? -1 : 1, y: 0 };
+          const power = clamp(speed / SWIPE_FULL_SPEED, 0, 1);
+          commitSwing(dir.x, dir.y, power);
+          lastHitTime = now;
+          hitFlashTime = now;
+        }
+      }
+      const flash = now - hitFlashTime < 220 ? 1 - (now - hitFlashTime) / 220 : 0;
 
       // --- send input at a fixed rate -------------------------------------
       inputAccum += dt * 1000;
       if (inputAccum >= inputInterval) {
         inputAccum = 0;
+        const p = predicted.current ?? target;
         sendInput({
           seq: ++seq.current,
-          targetX: predicted.current.x,
-          targetY: predicted.current.y,
+          targetX: p.x,
+          targetY: p.y,
           charging: inputState.charging,
           swingId: inputState.swingId,
           aimX: inputState.aimX,
@@ -199,11 +227,13 @@ export function useGameLoop(
       }
 
       // --- draw ------------------------------------------------------------
-      const state = getRenderState();
       if (state) {
-        const viz: SwingViz | null = charging
-          ? { charging: true, power, aimX: aimNow().x, aimY: aimNow().y }
-          : null;
+        let viz: SwingViz | null = null;
+        if (charging) {
+          viz = { charging: true, power: servePower, aimX: mySide === 'B' ? -1 : 1, aimY: 0, flash: 0 };
+        } else if (flash > 0) {
+          viz = { charging: false, power: 0, aimX: inputState.aimX, aimY: inputState.aimY, flash };
+        }
         renderer.draw(state, mySide, predicted.current, viz);
       }
 

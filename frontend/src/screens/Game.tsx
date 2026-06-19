@@ -33,13 +33,13 @@ export function Game() {
     if (phase === 'serving') {
       if (!amServer) return 'Opponent to serve';
       return touch
-        ? 'Your serve — hold SERVE, drag to aim, release'
-        : 'Your serve — hold left-click, drag to aim, release';
+        ? 'Your serve — hold SERVE to charge (you can still move), release'
+        : 'Your serve — hold left-click to charge (you can still move), release';
     }
     if (phase === 'rally') {
       return touch
-        ? 'Move: finger on court · Hit: hold HIT + drag to aim'
-        : 'Move: mouse · Hit: hold left-click, drag to aim, release';
+        ? 'Swipe your paddle through the ball — speed & direction = your shot'
+        : 'Swipe your paddle through the ball — speed & direction = your shot';
     }
     return '';
   })();
@@ -56,7 +56,7 @@ export function Game() {
 
       {hint && <div className="hint">{hint}</div>}
 
-      {touch && (phase === 'rally' || phase === 'serving') && (
+      {touch && phase === 'serving' && amServer && (
         <TouchControls canServe={canServe} />
       )}
 

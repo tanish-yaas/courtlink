@@ -48,6 +48,11 @@ export const CHARGE_TIME_S = 0.8;
 export const SHOT_MIN_DIST = 13; // landing distance at min power
 export const SHOT_MAX_DIST = 40; // landing distance at full power
 
+// Air-hockey rally hits: contact + swipe velocity decides power & direction.
+export const SWIPE_FULL_SPEED = 70; // cursor speed (ft/s) that maps to full power
+export const HIT_COOLDOWN_S = 0.28; // min time between a player's contact hits
+export const SERVER_HIT_REACH = 7.0; // generous server-side contact validation (lag tolerance)
+
 // --- Networking / loop timing ---------------------------------------------
 export const TICK_RATE = 60;
 export const SNAPSHOT_RATE = 30;
