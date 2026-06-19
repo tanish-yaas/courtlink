@@ -178,7 +178,7 @@ export function useGameLoop(
       if (phase === 'rally' && state && mySide && now - lastHitTime > HIT_COOLDOWN_S * 1000) {
         const ball = state.ball;
         const onMySide = mySide === 'A' ? ball.x <= NET_X + CONTACT_REACH : ball.x >= NET_X - CONTACT_REACH;
-        const ps = renderer.worldToScreenCss(predicted.current.x, predicted.current.y);
+        const ps = renderer.worldToScreenCss(target.x, target.y);
         const bs = renderer.ballScreenCss(ball);
         const dpx = Math.hypot(ps.x - bs.x, ps.y - bs.y);
         const reachPx = CONTACT_REACH * renderer.pxPerFootCss;

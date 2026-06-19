@@ -252,8 +252,8 @@ export class GameSim {
     // position 1:1), so the server only needs a generous sanity gate to reject
     // hits when the ball clearly isn't near the paddle. The wide reach absorbs
     // the ~100-200ms the client's view lags behind the authoritative ball.
-    const dist = Math.hypot(this.ball.x - p.x, this.ball.y - p.y);
-    if (dist > SERVER_HIT_REACH || this.ball.z > HIT_MAX_HEIGHT) return; // whiff
+    const gap = Math.hypot(this.ball.x - p.x, this.ball.y - p.y);
+    if (gap > SERVER_HIT_REACH || this.ball.z > HIT_MAX_HEIGHT) return; // whiff
 
     const onMySide = side === 'A' ? this.ball.x <= NET_X + SERVER_HIT_REACH : this.ball.x >= NET_X - SERVER_HIT_REACH;
     if (!onMySide) return;
