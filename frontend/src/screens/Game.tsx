@@ -31,9 +31,16 @@ export function Game() {
 
   const hint = (() => {
     if (phase === 'serving') {
-      return amServer ? 'Your serve — press Space / Serve' : 'Opponent to serve';
+      if (!amServer) return 'Opponent to serve';
+      return touch
+        ? 'Your serve — hold SERVE, drag to aim, release'
+        : 'Your serve — hold left-click, drag to aim, release';
     }
-    if (phase === 'rally') return 'Move: WASD / Arrows · Hit: Space';
+    if (phase === 'rally') {
+      return touch
+        ? 'Move: finger on court · Hit: hold HIT + drag to aim'
+        : 'Move: mouse · Hit: hold left-click, drag to aim, release';
+    }
     return '';
   })();
 

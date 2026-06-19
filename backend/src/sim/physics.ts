@@ -15,6 +15,7 @@ import {
   COURT_LENGTH,
   COURT_WIDTH,
   GRAVITY,
+  NET_CLEAR_MARGIN,
   NET_HEIGHT,
   NET_X,
   WORLD_MAX_X,
@@ -110,5 +111,53 @@ export function stepBall(ball: BallState, dt: number): StepResult {
 export function isInCourt(x: number, y: number): boolean {
   return inBoundsXY(x, y);
 }
+
+/**
+ * Solve a launch velocity that carries the ball from `from` to a target point
+ * on the court (landing at ground level) while GUARANTEEING it clears the net.
+ *
+ * We pick a flight time, derive the horizontal velocity to reach the target and
+ * the vertical velocity to land at z≈0 in that time, then check the height at
+ * the net plane. If the arc would clip the tape, we raise the flight time
+ * (higher, slower arc) and try again. This is what makes rallies sustain: any
+ * makeable shot physically clears the net instead of dying into it.
+ */
+export function solveArc(
+  from: { x: number; y: number; z: number },
+  tx: number,
+  ty: number,
+): { vx: number; vy: number; vz: number } {
+  const dx = tx - from.x;
+  const dy = ty - from.y;
+  const D = Math.hypot(dx, dy) || 0.001;
+  let T = clampN(0.5 + D * 0.026, 0.55, 1.6);
+
+  const crossesNet = from.x < NET_X !== tx < NET_X;
+
+  for (let iter = 0; iter < 7; iter++) {
+    const vx = dx / T;
+    const vy = dy / T;
+    const vz = (0 - from.z + 0.5 * GRAVITY * T * T) / T; // lands at z=0 at time T
+
+    if (crossesNet && Math.abs(vx) > 1e-4) {
+      const tNet = (NET_X - from.x) / vx;
+      if (tNet > 0 && tNet < T) {
+        const zNet = from.z + vz * tNet - 0.5 * GRAVITY * tNet * tNet;
+        if (zNet < NET_HEIGHT + NET_CLEAR_MARGIN) {
+          T *= 1.16; // raise the arc and re-solve
+          continue;
+        }
+      }
+    }
+    return { vx, vy, vz };
+  }
+
+  const vx = dx / T;
+  const vy = dy / T;
+  const vz = (0 - from.z + 0.5 * GRAVITY * T * T) / T;
+  return { vx, vy, vz };
+}
+
+const clampN = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 export { sideForX };

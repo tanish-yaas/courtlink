@@ -139,14 +139,27 @@ export interface ConfigureReq {
   rules: Partial<RuleConfig>;
 }
 
-/** Per-frame player intent. The server validates and applies these. */
+/**
+ * Per-frame player intent. The local player drives their paddle by POSITION
+ * (mouse/finger = 1:1 cursor), and swings are charge-and-release:
+ *   - `targetX/targetY`: desired paddle position in WORLD coords (server clamps
+ *     it to the player's own half).
+ *   - `charging`: the player is holding to charge a swing (paddle is locked).
+ *   - `swingId`: increments by 1 on every release/fire. The server performs a
+ *     swing exactly once per new id (resent each frame for loss tolerance).
+ *   - `aimX/aimY`: WORLD-space aim direction at release (already un-rotated by
+ *     the client, so the server reads it directly).
+ *   - `power`: 0..1 charge level at release.
+ */
 export interface InputReq {
   seq: number; // monotonic per-client sequence number
-  dirX: number; // -1..1 desired movement
-  dirY: number; // -1..1 desired movement
-  hit: boolean; // pressing the hit/return button this frame
-  serve: boolean; // pressing serve this frame
-  aimY: number; // -1..1 vertical aim influence for hits/serves
+  targetX: number;
+  targetY: number;
+  charging: boolean;
+  swingId: number;
+  aimX: number;
+  aimY: number;
+  power: number;
 }
 
 // ---------------------------------------------------------------------------

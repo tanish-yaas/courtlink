@@ -1,80 +1,60 @@
 /**
- * Input controller — maps keyboard and touch into a normalized intent.
+ * Input state — a tiny shared store the game loop and the on-screen controls
+ * both write into. It is device-agnostic on purpose:
  *
- * The same shape (dirX, dirY, hit, serve, aimY) is produced regardless of
- * device, so the game loop and server treat desktop and mobile identically.
- * Touch controls (virtual joystick + buttons) write into `touch*` setters.
+ *   - Pointer (mouse or finger) position over the court sets the paddle TARGET
+ *     in world coords (the loop converts screen->world). The paddle follows 1:1.
+ *   - `wantCharge` is the "hold to charge a swing" signal. Desktop sets it from
+ *     the left mouse button (and Space); mobile sets it from the HOLD-TO-HIT
+ *     button. While charging, the paddle locks and pointer movement becomes the
+ *     slingshot AIM drag. Releasing fires.
+ *
+ * The loop owns charge timing + aim math (it has the renderer's transform) and
+ * calls `commitSwing` to publish the released swing.
  */
-export interface Intent {
-  dirX: number;
-  dirY: number;
-  hit: boolean;
-  serve: boolean;
-  aimY: number;
+export const inputState = {
+  // paddle target in WORLD coords
+  targetX: 0,
+  targetY: 0,
+  // latest pointer position in CSS px relative to the canvas (for aim drag)
+  pointerX: 0,
+  pointerY: 0,
+  // hold-to-charge signal (any device)
+  wantCharge: false,
+  // reflects whether we are actually charging (loop sets this; for viz)
+  charging: false,
+  // released-swing output
+  swingId: 0,
+  aimX: 1,
+  aimY: 0,
+  power: 0,
+};
+
+export function setTarget(x: number, y: number) {
+  inputState.targetX = x;
+  inputState.targetY = y;
 }
 
-const keys = new Set<string>();
-
-// Touch state, written by the on-screen controls.
-let touchDirX = 0;
-let touchDirY = 0;
-let touchHit = false;
-let touchServe = false;
-
-export function setTouchDir(x: number, y: number) {
-  touchDirX = x;
-  touchDirY = y;
-}
-export function setTouchHit(v: boolean) {
-  touchHit = v;
-}
-export function setTouchServe(v: boolean) {
-  touchServe = v;
+export function setPointer(x: number, y: number) {
+  inputState.pointerX = x;
+  inputState.pointerY = y;
 }
 
-function onKeyDown(e: KeyboardEvent) {
-  keys.add(e.key.toLowerCase());
-  // Prevent the page from scrolling when using arrows / space in-game.
-  if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(e.key.toLowerCase())) {
-    e.preventDefault();
-  }
-}
-function onKeyUp(e: KeyboardEvent) {
-  keys.delete(e.key.toLowerCase());
+export function setWantCharge(v: boolean) {
+  inputState.wantCharge = v;
 }
 
-export function startInput() {
-  window.addEventListener('keydown', onKeyDown, { passive: false });
-  window.addEventListener('keyup', onKeyUp);
-}
-export function stopInput() {
-  window.removeEventListener('keydown', onKeyDown);
-  window.removeEventListener('keyup', onKeyUp);
-  keys.clear();
+export function commitSwing(aimX: number, aimY: number, power: number) {
+  inputState.aimX = aimX;
+  inputState.aimY = aimY;
+  inputState.power = power;
+  inputState.swingId += 1;
 }
 
-/**
- * Read the current intent. `side` lets us keep controls intuitive: for both
- * players, Up/W moves toward the top sideline and Left/A moves toward Team A's
- * baseline — i.e. world axes, so it reads naturally on a top-down court.
- */
-export function readIntent(): Intent {
-  let dirX = 0;
-  let dirY = 0;
-  if (keys.has('a') || keys.has('arrowleft')) dirX -= 1;
-  if (keys.has('d') || keys.has('arrowright')) dirX += 1;
-  if (keys.has('w') || keys.has('arrowup')) dirY += 1; // +y = toward top sideline
-  if (keys.has('s') || keys.has('arrowdown')) dirY -= 1;
-
-  // Touch overrides/augments keyboard.
-  if (touchDirX !== 0 || touchDirY !== 0) {
-    dirX = touchDirX;
-    dirY = touchDirY;
-  }
-
-  const hit = keys.has(' ') || keys.has('k') || touchHit;
-  const serve = keys.has(' ') || keys.has('j') || touchServe;
-  const aimY = dirY;
-
-  return { dirX, dirY, hit, serve, aimY };
+export function resetInput(side: 'A' | 'B' | null) {
+  inputState.wantCharge = false;
+  inputState.charging = false;
+  inputState.aimX = side === 'B' ? -1 : 1;
+  inputState.aimY = 0;
+  inputState.power = 0;
 }

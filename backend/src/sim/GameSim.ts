@@ -1,10 +1,14 @@
 /**
  * GameSim — the authoritative pickleball simulation.
  *
- * The SERVER owns this. Clients only send intent (InputReq) and render
- * interpolated snapshots. Nothing here trusts the client beyond movement
- * intent, which is clamped and validated. This is what prevents cheating and
- * keeps both players in agreement: there is exactly one source of truth.
+ * The SERVER owns this. Clients send intent (InputReq): a desired paddle
+ * POSITION (mouse/finger 1:1) plus charge-and-release SWINGS. The server moves
+ * paddles to the requested position (clamped to each player's half) and, on a
+ * new swingId, performs a serve or a hit — always launching the ball on an arc
+ * that is solved to clear the net, so rallies sustain.
+ *
+ * Coordinate system is fixed (A defends x<net, B defends x>net). Clients rotate
+ * the view locally; the simulation never rotates.
  */
 import {
   BALL_RADIUS,
@@ -12,11 +16,10 @@ import {
   COURT_LENGTH,
   COURT_WIDTH,
   HIT_MAX_HEIGHT,
-  HIT_POWER,
   NET_X,
   PADDLE_REACH,
-  PADDLE_SPEED,
-  SERVE_POWER,
+  SHOT_MAX_DIST,
+  SHOT_MIN_DIST,
   WORLD_MAX_X,
   WORLD_MAX_Y,
   WORLD_MIN_X,
@@ -31,7 +34,7 @@ import type {
   ScoreState,
   Side,
 } from '../shared/types';
-import { stepBall, type BallState } from './physics';
+import { solveArc, stepBall, type BallState } from './physics';
 import {
   diagonalTarget,
   evaluateServeLanding,
@@ -42,12 +45,20 @@ import {
   serviceCourtFor,
 } from './rules';
 
+interface PendingSwing {
+  aimX: number;
+  aimY: number;
+  power: number;
+}
+
 interface PaddleRuntime {
   x: number;
   y: number;
   input: InputReq;
   lastSeq: number;
-  hitCooldown: number; // seconds until this side may hit again
+  lastSwingId: number;
+  pendingSwing: PendingSwing | null;
+  hitCooldown: number;
 }
 
 interface RallyTracking {
@@ -64,20 +75,11 @@ export class GameSim {
   phase: Phase = 'lobby';
   tick = 0;
   ball: BallState = { x: NET_X, y: CENTER_Y, z: BALL_RADIUS, vx: 0, vy: 0, vz: 0 };
-  score: ScoreState = {
-    A: 0,
-    B: 0,
-    serving: 'A',
-    serverNumber: 1,
-    serviceCourt: 'right',
-  };
-  paddles: Record<Side, PaddleRuntime> = {
-    A: makePaddle('A'),
-    B: makePaddle('B'),
-  };
+  score: ScoreState = { A: 0, B: 0, serving: 'A', serverNumber: 1, serviceCourt: 'right' };
+  paddles: Record<Side, PaddleRuntime> = { A: makePaddle('A'), B: makePaddle('B') };
 
   private rally: RallyTracking = freshRally();
-  private timer = 0; // generic phase timer (countdown / point pause)
+  private timer = 0;
   private events: GameEvent[] = [];
 
   constructor(public rules: RuleConfig) {}
@@ -104,12 +106,16 @@ export class GameSim {
 
   applyInput(side: Side, input: InputReq) {
     const p = this.paddles[side];
-    if (input.seq <= p.lastSeq) return; // ignore stale/duplicate
+    if (input.seq <= p.lastSeq) return; // stale/duplicate
     p.input = input;
     p.lastSeq = input.seq;
+    // A new swingId means the player released a charged swing.
+    if (input.swingId > p.lastSwingId) {
+      p.lastSwingId = input.swingId;
+      p.pendingSwing = { aimX: input.aimX, aimY: input.aimY, power: clamp(input.power, 0, 1) };
+    }
   }
 
-  /** Drain queued events for broadcasting. */
   takeEvents(): GameEvent[] {
     const out = this.events;
     this.events = [];
@@ -128,8 +134,10 @@ export class GameSim {
         break;
       case 'serving':
         this.holdServe();
+        this.consumeServeSwing();
         break;
       case 'rally':
+        this.consumeHitSwings();
         this.stepRally(dt);
         break;
       case 'pointOver':
@@ -137,22 +145,22 @@ export class GameSim {
         if (this.timer <= 0) this.beginServe();
         break;
       default:
-        break; // lobby / paused / matchOver: ball is frozen
+        break; // lobby / paused / matchOver: ball frozen
     }
+
+    // Drop any swings that couldn't be used this phase so they don't linger.
+    this.paddles.A.pendingSwing = this.phase === 'serving' || this.phase === 'rally' ? this.paddles.A.pendingSwing : null;
+    this.paddles.B.pendingSwing = this.phase === 'serving' || this.phase === 'rally' ? this.paddles.B.pendingSwing : null;
   }
 
-  // -- movement ------------------------------------------------------------
+  // -- movement: paddle follows the client's requested position 1:1 --------
   private movePaddles(dt: number) {
     (['A', 'B'] as Side[]).forEach((side) => {
       const p = this.paddles[side];
-      const len = Math.hypot(p.input.dirX, p.input.dirY) || 1;
-      p.x += (p.input.dirX / len) * PADDLE_SPEED * dt * (Math.abs(p.input.dirX) > 0 || Math.abs(p.input.dirY) > 0 ? 1 : 0);
-      p.y += (p.input.dirY / len) * PADDLE_SPEED * dt * (Math.abs(p.input.dirX) > 0 || Math.abs(p.input.dirY) > 0 ? 1 : 0);
-      // Clamp each player to their own half + the world bounds.
       const xMin = side === 'A' ? WORLD_MIN_X : NET_X + 0.3;
       const xMax = side === 'A' ? NET_X - 0.3 : WORLD_MAX_X;
-      p.x = clamp(p.x, xMin, xMax);
-      p.y = clamp(p.y, WORLD_MIN_Y, WORLD_MAX_Y);
+      p.x = clamp(p.input.targetX, xMin, xMax);
+      p.y = clamp(p.input.targetY, WORLD_MIN_Y, WORLD_MAX_Y);
       if (p.hitCooldown > 0) p.hitCooldown -= dt;
     });
   }
@@ -162,60 +170,127 @@ export class GameSim {
     this.phase = 'serving';
     this.rally = freshRally();
     this.score.serviceCourt = serviceCourtFor(this.score[this.score.serving]);
-    // Park the ball at the server's service position behind the baseline.
     const server = this.score.serving;
-    const box = serviceBox(server, this.score.serviceCourt);
+    const court = serviceCourtFor(this.score[server]);
+    const ownBox = serviceBox(server, court);
     const x = server === 'A' ? Math.max(WORLD_MIN_X + 1.5, 1.0) : Math.min(WORLD_MAX_X - 1.5, COURT_LENGTH - 1.0);
-    const y = (box.yMin + box.yMax) / 2;
+    const y = (ownBox.yMin + ownBox.yMax) / 2;
     this.ball = { x, y, z: 1.0, vx: 0, vy: 0, vz: 0 };
-    // Nudge the server paddle to a sensible serving spot.
-    this.paddles[server].x = x;
-    this.paddles[server].y = y;
+    // Seed the server paddle (and its input target) at the serving spot.
+    const p = this.paddles[server];
+    p.x = x;
+    p.y = y;
+    p.input.targetX = x;
+    p.input.targetY = y;
+    p.pendingSwing = null;
+    this.paddles[opponent(server)].pendingSwing = null;
   }
 
   private holdServe() {
     const server = this.score.serving;
     const p = this.paddles[server];
-    // Ball tracks the server until they serve.
     this.ball.x = p.x;
     this.ball.y = p.y;
     this.ball.z = 1.0;
-    if (p.input.serve && p.hitCooldown <= 0) {
-      this.launchServe(server, p.input.aimY);
-    }
+    this.ball.vx = 0;
+    this.ball.vy = 0;
+    this.ball.vz = 0;
   }
 
-  private launchServe(server: Side, aimY: number) {
-    const target = diagonalTarget(server);
-    const box = serviceBox(target.side, serviceCourtFor(this.score[server]));
-    const targetX = (box.xMin + box.xMax) / 2;
-    const targetY = (box.yMin + box.yMax) / 2 + aimY * 4;
+  private consumeServeSwing() {
+    const server = this.score.serving;
+    const p = this.paddles[server];
+    if (!p.pendingSwing || p.hitCooldown > 0) return;
+    const swing = p.pendingSwing;
+    p.pendingSwing = null;
+    this.launchServe(server, swing);
+  }
 
-    const dir = server === 'A' ? 1 : -1;
-    this.ball.vx = dir * SERVE_POWER;
-    // Lateral velocity to drift toward the diagonal target.
-    this.ball.vy = clamp((targetY - this.ball.y) * 0.9, -SERVE_POWER * 0.5, SERVE_POWER * 0.5);
-    // Upward arc tuned so the ball comes down near the target box.
-    this.ball.vz = 9.5;
-    void targetX;
+  private launchServe(server: Side, swing: PendingSwing) {
+    // Serve must land in the diagonal service box. We aim at that box's centre
+    // (nudged a little by the player's aim/power) and clamp inside it, so a
+    // casual serve is reliably legal and the rally can begin.
+    const court = serviceCourtFor(this.score[server]);
+    const target = diagonalTarget(server);
+    const box = serviceBox(target.side, court);
+    const inset = 1.4;
+    const cx = (box.xMin + box.xMax) / 2;
+    const cy = (box.yMin + box.yMax) / 2;
+    const tx = clamp(cx + swing.aimX * 2 + (swing.power - 0.5) * 3, box.xMin + inset, box.xMax - inset);
+    const ty = clamp(cy + swing.aimY * 4, box.yMin + inset, box.yMax - inset);
+
+    const v = solveArc({ x: this.ball.x, y: this.ball.y, z: this.ball.z }, tx, ty);
+    this.ball.vx = v.vx;
+    this.ball.vy = v.vy;
+    this.ball.vz = v.vz;
 
     this.rally.lastHitBy = server;
     this.rally.serveInProgress = true;
     this.rally.bounceSinceLastHit = false;
     this.phase = 'rally';
-    this.paddles[server].hitCooldown = 0.4;
+    this.paddles[server].hitCooldown = 0.35;
     this.emit({ type: 'serve', side: server });
   }
 
   // -- rally ---------------------------------------------------------------
-  private stepRally(dt: number) {
-    // Player hit attempts first (so a fast ball can be intercepted).
-    (['A', 'B'] as Side[]).forEach((side) => this.tryHit(side));
+  private consumeHitSwings() {
+    (['A', 'B'] as Side[]).forEach((side) => {
+      const p = this.paddles[side];
+      if (!p.pendingSwing) return;
+      const swing = p.pendingSwing;
+      p.pendingSwing = null;
+      this.tryHit(side, swing);
+    });
+  }
 
+  private tryHit(side: Side, swing: PendingSwing) {
+    const p = this.paddles[side];
+    if (p.hitCooldown > 0) return;
+
+    const dx = Math.abs(this.ball.x - p.x);
+    const dy = Math.abs(this.ball.y - p.y);
+    if (dx > PADDLE_REACH || dy > PADDLE_REACH || this.ball.z > HIT_MAX_HEIGHT) return; // whiff
+
+    const onMySide = side === 'A' ? this.ball.x <= NET_X + PADDLE_REACH : this.ball.x >= NET_X - PADDLE_REACH;
+    if (!onMySide) return;
+
+    const isVolley = this.ball.z > BALL_RADIUS + 0.05 && !this.rally.bounceSinceLastHit;
+    if (isVolley && this.rules.twoBounceRule && !this.rally.canVolley[side]) {
+      this.resolvePoint(opponent(side), 'twoBounceViolation');
+      return;
+    }
+    if (isVolley && this.rules.enforceKitchen && inKitchen(side, p.x)) {
+      this.resolvePoint(opponent(side), 'kitchenVolley');
+      return;
+    }
+
+    // Resolve the swing into a landing point in the opponent's court, then
+    // solve an arc that clears the net to get there.
+    const dist = SHOT_MIN_DIST + (SHOT_MAX_DIST - SHOT_MIN_DIST) * swing.power;
+    let tx = this.ball.x + swing.aimX * dist;
+    let ty = this.ball.y + swing.aimY * dist;
+
+    // Force the shot into the opponent's half and keep it in play.
+    const oppMinX = side === 'A' ? NET_X + 1.5 : 1.0;
+    const oppMaxX = side === 'A' ? COURT_LENGTH - 1.0 : NET_X - 1.5;
+    tx = clamp(tx, oppMinX, oppMaxX);
+    ty = clamp(ty, 1.0, COURT_WIDTH - 1.0);
+
+    const v = solveArc({ x: this.ball.x, y: this.ball.y, z: this.ball.z }, tx, ty);
+    this.ball.vx = v.vx;
+    this.ball.vy = v.vy;
+    this.ball.vz = v.vz;
+
+    this.rally.lastHitBy = side;
+    this.rally.bounceSinceLastHit = false;
+    p.hitCooldown = 0.2;
+    this.emit({ type: 'hit', side });
+  }
+
+  private stepRally(dt: number) {
     const res = stepBall(this.ball, dt);
 
     if (res.hitNet) {
-      // Whoever last touched it failed to clear the net.
       const loser = this.rally.lastHitBy ?? this.score.serving;
       this.resolvePoint(opponent(loser), 'net');
       return;
@@ -223,7 +298,6 @@ export class GameSim {
 
     if (res.bounced) {
       const bSide = res.bounceSide!;
-      // Serve landing is judged on its first bounce.
       if (this.rally.serveInProgress) {
         const fault = evaluateServeLanding(
           this.score.serving,
@@ -240,17 +314,16 @@ export class GameSim {
         }
         this.rally.canVolley[bSide] = true;
         this.rally.bounceSinceLastHit = true;
+        this.emit({ type: 'bounce', side: bSide });
         return;
       }
 
-      // Out of bounds => the side that hit it last loses.
       if (!res.bounceInBounds) {
         const loser = this.rally.lastHitBy ?? opponent(bSide);
         this.resolvePoint(opponent(loser), 'out');
         return;
       }
 
-      // Double bounce => the side that let it bounce twice loses.
       if (this.rally.bounceSinceLastHit) {
         this.resolvePoint(opponent(bSide), 'doubleBounce');
         return;
@@ -260,44 +333,6 @@ export class GameSim {
       this.rally.canVolley[bSide] = true;
       this.emit({ type: 'bounce', side: bSide });
     }
-  }
-
-  private tryHit(side: Side) {
-    const p = this.paddles[side];
-    if (!p.input.hit || p.hitCooldown > 0) return;
-    if (this.phase !== 'rally') return;
-
-    const dx = Math.abs(this.ball.x - p.x);
-    const dy = Math.abs(this.ball.y - p.y);
-    if (dx > PADDLE_REACH || dy > PADDLE_REACH || this.ball.z > HIT_MAX_HEIGHT) return;
-
-    // Only let a side hit a ball that is on/over their region or just past it.
-    const onMySide = side === 'A' ? this.ball.x <= NET_X + PADDLE_REACH : this.ball.x >= NET_X - PADDLE_REACH;
-    if (!onMySide) return;
-
-    const isVolley = this.ball.z > BALL_RADIUS + 0.05 && !this.rally.bounceSinceLastHit;
-
-    // Two-bounce rule: cannot volley until this side has had its bounce.
-    if (isVolley && this.rules.twoBounceRule && !this.rally.canVolley[side]) {
-      this.resolvePoint(opponent(side), 'twoBounceViolation');
-      return;
-    }
-    // Kitchen rule: no volleys while standing in the non-volley zone.
-    if (isVolley && this.rules.enforceKitchen && inKitchen(side, p.x)) {
-      this.resolvePoint(opponent(side), 'kitchenVolley');
-      return;
-    }
-
-    // Legal hit: send the ball back across with an arc + player aim.
-    const dir = side === 'A' ? 1 : -1;
-    this.ball.vx = dir * HIT_POWER;
-    this.ball.vy = clamp(p.input.aimY * HIT_POWER * 0.5 + (this.ball.y - CENTER_Y) * 0.2, -HIT_POWER * 0.6, HIT_POWER * 0.6);
-    this.ball.vz = 7.5 + Math.random() * 1.5;
-
-    this.rally.lastHitBy = side;
-    this.rally.bounceSinceLastHit = false;
-    p.hitCooldown = 0.22;
-    this.emit({ type: 'hit', side });
   }
 
   // -- scoring -------------------------------------------------------------
@@ -347,11 +382,23 @@ export class GameSim {
 
 // --- helpers ---------------------------------------------------------------
 function makePaddle(side: Side): PaddleRuntime {
+  const x = side === 'A' ? COURT_LENGTH * 0.14 : COURT_LENGTH * 0.86;
   return {
-    x: side === 'A' ? COURT_LENGTH * 0.18 : COURT_LENGTH * 0.82,
+    x,
     y: CENTER_Y,
-    input: { seq: 0, dirX: 0, dirY: 0, hit: false, serve: false, aimY: 0 },
+    input: {
+      seq: 0,
+      targetX: x,
+      targetY: CENTER_Y,
+      charging: false,
+      swingId: 0,
+      aimX: side === 'A' ? 1 : -1,
+      aimY: 0,
+      power: 0,
+    },
     lastSeq: 0,
+    lastSwingId: 0,
+    pendingSwing: null,
     hitCooldown: 0,
   };
 }
@@ -366,5 +413,3 @@ function freshRally(): RallyTracking {
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-void COURT_WIDTH;
-void WORLD_MAX_Y;
